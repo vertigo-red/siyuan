@@ -6,6 +6,7 @@ on:
       - '*-alpha*'
       - '*-beta*'
       - '*-rc*'
+      - '*.fork*'
   workflow_dispatch:
 
 env:
@@ -20,6 +21,7 @@ jobs:
       version: ${{ steps.version.outputs.value }}
       packageManager: ${{ steps.packageManager.outputs.value }}
       release_body: ${{ steps.release_info.outputs.release_body }}
+      fork_tag: ${{ steps.fork_tag.outputs.value }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -49,12 +51,53 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF_NAME#v}"
+          # Fork change: strip the ".forkN" suffix before comparing, so that
+          # v3.7.3.fork1 / v3.7.3.fork2 / ... all validate against version 3.7.3.
+          TAG="${TAG%%.fork*}"
           VERSION="${{ steps.version.outputs.value }}"
           if [ "$TAG" != "$VERSION" ]; then
             echo "Tag (v$TAG) does not match version in package.json ($VERSION), stopping"
             exit 1
           fi
           echo "Tag matches version: $TAG"
+
+      # Fork change: derive the release tag as v<upstream version>.fork<N>.
+      # N is the highest existing fork number for the current upstream version, plus one.
+      # Syncing with upstream bumps package.json, which resets the counter back to fork1.
+      - name: Compute fork tag
+        id: fork_tag
+        run: |
+          BASE="${{ steps.version.outputs.value }}"
+
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "Using pushed tag: ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          {
+            gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' 2>/dev/null || true
+            gh api --paginate "repos/${{ github.repository }}/releases" --jq '.[].tag_name' 2>/dev/null || true
+          } | sort -u > /tmp/known_tags.txt
+
+          N=0
+          while read -r t; do
+            case "$t" in
+              "v${BASE}.fork"*)
+                num="${t##*.fork}"
+                case "$num" in
+                  ''|*[!0-9]*) continue ;;
+                esac
+                [ "$num" -gt "$N" ] && N="$num"
+                ;;
+            esac
+          done < /tmp/known_tags.txt
+
+          NEXT="v${BASE}.fork$((N + 1))"
+          echo "value=${NEXT}" >> $GITHUB_OUTPUT
+          echo "Next fork tag: ${NEXT} (upstream base ${BASE}, highest existing fork ${N})"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract electronVersion from package.json
         id: electronVersion
@@ -69,13 +112,24 @@ jobs:
       - name: Gather Release Information
         id: release_info
         run: |
-          echo "release_title=SiYuan v${{ steps.version.outputs.value }}" >> $GITHUB_OUTPUT
-          changelog_header=$(python scripts/parse-changelog-HEAD.py -t "${{ github.ref }}" -b "${{ steps.thisLatestRelease.outputs.release }}" -e "${{ steps.electronVersion.outputs.value }}" "${{ github.repository }}")
-          changelog=$(python scripts/parse-changelog.py -t "${{ github.ref }}" "${{ github.repository }}")
+          BASE="${{ steps.version.outputs.value }}"
+          TAG="${{ steps.fork_tag.outputs.value }}"
+          echo "release_title=SiYuan ${TAG}" >> $GITHUB_OUTPUT
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "release_body<<$EOF" >> $GITHUB_OUTPUT
-          echo "$changelog_header" >> $GITHUB_OUTPUT
-          echo "$changelog" >> $GITHUB_OUTPUT
+          cat >> $GITHUB_OUTPUT <<BODY
+          Unofficial build of SiYuan with WebDAV / S3 / local sync unlocked.
+
+          Based on upstream release v${BASE}. Built from commit ${GITHUB_SHA:0:7}.
+
+          Changes against upstream:
+          - Third-party sync providers (WebDAV, S3, Local) no longer require a paid plan.
+          - The first-party SiYuan cloud service is unchanged and still requires a subscription.
+
+          Source: AGPL-3.0, see the repository for the full diff.
+          Android builds are signed with a fork-specific key and cannot be installed
+          over the official app - uninstall it first (export your workspace beforehand).
+          BODY
           echo "$EOF" >> $GITHUB_OUTPUT
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -393,6 +447,10 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [prepare, build, build_android]
+    # Fork change: the default GITHUB_TOKEN is read-only in forks, which made the
+    # release step fail with "403 Resource not accessible by integration".
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -401,10 +459,15 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           name: ${{ needs.prepare.outputs.release_title }}
-          tag: ${{ github.ref }}
+          # Fork change: tag comes from the computed fork tag, not github.ref, so that
+          # manual (workflow_dispatch) runs produce v<version>.fork<N> instead of
+          # a bogus "refs/heads/master" tag. The tag is created on the built commit.
+          tag: ${{ needs.prepare.outputs.fork_tag }}
+          commit: ${{ github.sha }}
           body: ${{ needs.prepare.outputs.release_body }}
           draft: false
-          prerelease: true
+          prerelease: false
+          allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Release Assets
@@ -413,7 +476,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           VERSION=${{ needs.prepare.outputs.version }}
-          gh release upload ${{ github.ref_name }} \
+          gh release upload ${{ needs.prepare.outputs.fork_tag }} --clobber \
             "siyuan-linux/siyuan-${VERSION}-linux.AppImage#siyuan-${VERSION}-linux.AppImage" \
             "siyuan-linux/siyuan-${VERSION}-linux.tar.gz#siyuan-${VERSION}-linux.tar.gz" \
             "siyuan-linux/siyuan-${VERSION}-linux.deb#siyuan-${VERSION}-linux.deb" \
