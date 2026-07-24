@@ -1195,15 +1195,10 @@ func IsSubscriber() bool {
 }
 
 func IsPaidUser() bool {
-	if IsSubscriber() {
-		return true
-	}
-
-	u := Conf.GetUser()
-	if nil == u {
-		return false
-	}
-	return 1 == u.UserSiYuanOneTimePayStatus
+	// Fork change: third-party self-hosted sync (WebDAV / S3 / Local) is free for everyone.
+	// This function gates only the third-party providers; the first-party SiYuan cloud
+	// service is still gated separately via IsSubscriber(), so it remains unaffected.
+	return true
 }
 
 const (
