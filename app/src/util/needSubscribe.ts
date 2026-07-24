@@ -20,5 +20,7 @@ export const needSubscribe = (tip = window.siyuan.languages._kernel[29]) => {
  * 判断是否可以使用第三方同步
  */
 export const isPaidUser = () => {
-    return window.siyuan.user && (0 === window.siyuan.user.userSiYuanSubscriptionStatus || 1 === window.siyuan.user.userSiYuanOneTimePayStatus);
+    // Fork change: third-party self-hosted sync (WebDAV / S3 / Local) is free for everyone.
+    // Gates only third-party providers; the first-party SiYuan cloud still uses needSubscribe().
+    return true;
 };
